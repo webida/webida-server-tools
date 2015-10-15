@@ -16,92 +16,210 @@
  * limitations under the License.
  */
 
-var path = require('path');
-var fs = require('fs');
-var util = require('util');
-var cli = require('cli');
-var Promise = require('promise');
+var child_process = require('child_process'),
+    fs = require('fs'),
+    path = require('path'),
+    util = require('util');
 
-cli.enable('help', 'version', 'status', 'catchall');
-cli.setApp('webida-package-manager', '0.1.0');
+var cli = require('cli'),
+    Promise = require('promise');
+
+var PluginCatalog = require('./lib/PluginCatalog.js');
+
+var PROGRAM_NAME = 'webida-packabge-manager'
+var PROGRAM_VERSION = '0.2.0';
+var CATALOG_FILE = 'plugin-settings.json';
+var PACKAGE_DESCRIPTOR_FILE = "webida-package.json";
+
+cli.setApp(PROGRAM_NAME, PROGRAM_VERSION);
+cli.enable('help', 'version', 'status');
+cli.option_width = 25;
+cli.width = 80;
+
+// TODO : add 'help' command to support : webida-pacakge-manager help install
 
 cli.parse( {
-    'usage' : ['u', 'show detail usage', true],
+    'catalog' : ['a', 'catalog file name', 'string', CATALOG_FILE],
     'conf' : ['c', 'configuration directory path where catalog file exists', 'dir' ],
     'install-path' : ['i', 'package install directory ', 'dir', '.'],
-    'new' : ['n', 'create new catalog file if it does not exist (install only)', true],
-    'development' : ['d', 'use development plugin catalog file name \'plugin-settings-dev.json\'', true],
-    'branch' : ['b', 'use specific branch of source repository to install/update', 'string', 'master']
-});
-
-
-function loadCatalog(cli, command, options) {
-    var catalogDir = options.conf;
-
-    if (!catalogDir) {
-        cli.fatal("should run with --conf option. (-h for help)");
-    }
-    var catalogFileName = options.development ? 'plugin-settings-dev.json' : 'plugin-settings.json'
-    cli.debug("catalog file name = " + catalogFileName);
-    var catalogPath = path.resolve(options.conf + path.sep + catalogFileName);
-    cli.debug("catalog path = " + catalogPath);
-
-    if( fs.existsSync(catalogPath) ) {
-        options.catalogPath = catalogPath;
-        var data = fs.readFileSync(catalogPath);
-        return JSON.parse(data);
-    } else {
-        if (command != 'install' || !options.new) {
-            cli.fatal("no catalog file found at path " +catalogPath );
-            // program exits by fatal message.
-        }  else {
-            return {};
-        }
-    }
-}
-
-function showUsage() {
-    console.log('More Usages: ');
-    console.log(this.app + ' install <git-repository-url> <OPTIONS> [-b branch]');
-    console.log('  installs package from given git repository. ');
-    console.log(this.app + ' install <local-directory-path> <OPTIONS>');
-    console.log('  installs package from given local directory path ');
-    console.log('');
-    console.log('Notes:');
-    console.log('  Run ' + this.app + ' -h to see all <OPTIONS>' );
-    console.log('  Installation fails when <install-path>/<package-id> directory exists' )
-}
+    'branch' : ['b', 'use specific branch of source repository to install', 'string', 'master'],
+    'tmp-path' : ['t', 'temporary directory to save git repository before install', 'string', '/tmp']
+}, ['install', 'update', 'remove']);
 
 cli.main(function(args, options) {
-
-
-    if (options.usage) {
-        showUsage();
-        process.exit(0);
-    }
-
+    this.debug("cli command " + cli.command);
     this.debug("starting options \n" + util.inspect(options));
 
     // parse arguments build command
     this.debug("starting args " + util.inspect(args));
-    if (args.length < 2) {
-        this.fatal("need arguments. use --usages to read detailed commands  ")
-    }
-
-    var command = args[0].toLowerCase();
-    var source, target;
-
-    var catalog = loadCatalog(this, command, options);
-
-    switch(command) {
+    switch(cli.command) {
         case 'install':
+            doInstall(cli, options, args);
             break;
-        case 'update' :
-            break;
-        case 'remove' :
-            break;
+        case 'remove':
+            doRemove(cli, options, args);
         default:
-            this.fatal("unknown command - " + command);
+            cli.error("Sorry, not implemented yet.");
             break;
     }
+
 });
+
+function handleInstallError(err, tmpDir) {
+    if (tmpDir) {
+        cli.exec("rm -fr " + tmpDir, function () {
+            cli.info("removed dir " + tmpDir );
+            cli.fatal(err.stack ? err.stack : err);
+        }, function () {
+            cli.fatal(err.stack ? err.stack : err);
+            cli.error('& ONE MORE THING! Garbage collection failed. Remove manually ' + tmpDir);
+        });
+    } else {
+        cli.fatal(err.stack ? err.stack : err);
+    }
+}
+
+function runCommand(cli, command, params, ignoreFail) {
+    cli.info(util.format("running command %s %s", command, util.inspect(params)));
+    var proc = child_process.spawn(command, params, {stdio: 'inherit'});
+    return new Promise(function (resolve, reject) {
+        proc.on('exit', function (code, signal) {
+            cli.debug(command + ' process exit code ' + code + " signal " + signal);
+            if (ignoreFail && code != 0) {
+                var msg = util.format("%s failed, exit code %s ", command, signal);
+                if (signal)
+                    msg += " signal " + signal;
+                return reject( new Error(msg) );
+            } else {
+                return resolve();
+            }
+        });
+    });
+}
+
+function installPackage(descriptor, options, packageDir, fromLocal) {
+    cli.debug("got descriptor" + util.inspect(descriptor));
+    var installTo = options['install-path'] + path.sep + descriptor.id;
+    if (fs.existsSync(installTo)) {
+        throw new Error("already have existing package at " + installTo);
+    }
+    // TODO : add schema check of webida-package.json
+    var manifest = descriptor.manifest;
+    var command = util.format("%s %s %s",
+        (fromLocal ? "cp -Rf" : "mv"),
+        packageDir, installTo);
+    return new Promise(function (resolve, reject) {
+        cli.debug("installation command " + command);
+        cli.exec(command, function () {
+            return resolve(manifest);
+        }, function (err) {
+            return reject(err);
+        });
+    })
+}
+
+function cleanUpOldTmp(cli, tmpDir) {
+    return new Promise(function (resolve, reject) {
+        if (fs.existsSync(tmpDir) ) {
+            cli.exec("rm -fr " + tmpDir, function () {
+                cli.info("removed un-clenaed tmp dir " + tmpDir );
+                resolve();
+            }, function (err) {
+                cli.fatal('could not remove old tmp dir ' + tmpDir);
+            });
+        } else {
+            cli.info("no old tmp " + tmpDir);
+            return resolve();
+        }
+    });
+}
+
+function doInstall(cli, options, args) {
+    if (args.length < 1) {
+        cli.fatal("need url argument. run with -h to see usage ");
+    }
+
+    var tmpPath = options['tmp-path'];
+    var catalog = new PluginCatalog();
+    var tmpDir = path.resolve(tmpPath + '/cloning');
+    var descriptor;
+    var cwd = process.cwd();
+    var fromLocal = false;
+    var catalogPath = options.conf + path.sep + options.catalog;
+
+    cleanUpOldTmp(cli, tmpDir).then(function () {
+        return catalog.load(cli, catalogPath);
+    }).then(function () {
+        if (fs.existsSync(args[0]) ) {
+            fromLocal = true;
+            tmpDir = args[0];
+        } else {
+            return runCommand(cli, 'git',  ['clone','--verbose', args[0], tmpDir ] );
+        }
+    }).then(function () {
+        process.chdir(tmpDir);
+        if (!fromLocal) {
+            var params = ['checkout', options.branch];
+            return runCommand(cli, 'git', params);
+        } else {
+            return Promise.resolve();
+        }
+    }).then(function () {
+        cli.debug("current working directory is " + process.cwd());
+        if (!fs.existsSync(PACKAGE_DESCRIPTOR_FILE)) {
+            throw new Error("invalid package repository, no webida-packge.json found");
+        }
+        // read descriptor from cloned repository
+        var data = fs.readFileSync(PACKAGE_DESCRIPTOR_FILE);
+        return JSON.parse(data);
+    }).then(function (descriptorObj) {
+        descriptor = descriptorObj;
+        process.chdir(cwd);
+        return installPackage(descriptor, options, tmpDir, fromLocal);
+    }).then(function (manifest) {
+        catalog.addTo('plugins', manifest.plugins);
+        catalog.addTo('starters', manifest.starters);
+        catalog.addTo('disabled', manifest.disabled);
+        catalog.save(cli, catalogPath);
+    }).then(function () {
+        cli.info("installed new package " + descriptor.id);
+    }).catch(function (err) {
+        var gc = fromLocal ? undefined : tmpDir;
+        handleInstallError(err, gc);
+    });
+}
+
+function doRemove(cli, options, args) {
+    if (args.length < 1) {
+        cli.fatal("need package-name argument. run with -h to see usage ");
+    }
+
+    var catalog = new PluginCatalog();
+    var catalogPath = options.conf + path.sep + options.catalog;
+    var packageDir = path.resolve(options['install-path'] + path.sep + args[0]);
+    catalog.load(cli, catalogPath).then(function () {
+        cli.debug("catalog = " + util.inspect(catalog));
+        var descriptorPath = packageDir + path.sep + PACKAGE_DESCRIPTOR_FILE;
+        if (!fs.existsSync(descriptorPath)) {
+            throw new Error("invalid package repository, no webida-packge.json found for " + descriptorPath);
+        }
+        var data = fs.readFileSync(descriptorPath);
+        return JSON.parse(data);
+    }).then(function (descriptor) {
+        var manifest = descriptor.manifest;
+        for (var pidx in manifest.plugins) {
+            var plugin = manifest.plugins[pidx];
+            catalog.remove(plugin);
+            cli.debug(plugin + " is removed from catalog ");
+        }
+        cli.info("update catalog file to " + catalogPath);
+        return catalog.save(cli, catalogPath);
+    }).then(function () {
+        cli.info("removing package directory " + packageDir);
+        cli.exec("rm -fr " + packageDir, function() {
+            cli.info("uninstall complete");
+        });
+    }).catch(function (err) {
+        cli.fatal(err.stack ? err.stack : err);
+    });
+}
