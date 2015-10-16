@@ -1,4 +1,4 @@
-#!/bin/env node
+#!/usr/bin/env node
 
 /*
  * Copyright (c) 2015 S-Core Co., Ltd.
