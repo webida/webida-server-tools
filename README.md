@@ -14,18 +14,18 @@ $ npm -g install ./webida-server-tools
 
 *webida-server-tools is not a public node package yet. Do not search this package in your npm repository.*
 
+
 # webida-package-manager
 
-WPM(Webida Package Manager) is a simple tool to install/remove webida packages. Run webida-package-manager
-with -h option to see help, usages. 
+(under construction)
 
-To install some pacakge from a url https://github.com/webida/webida-core-package 
 
-```
-$ export WEBIDA_CATALOG_DIR=(where.is.your.plugin-settings.json) 
-$ export WEBIDA_PACKAGE_DIR=(where.is.your.plugins) 
-$ webida-package-manager install https://github.com/webida/webida-core-package 
-```
+## common options
 
-Use options -c and -i not to set environment variables. 
+most of tools supports following common options
+
+- -h (--help) : shows help message.
+- -V (--version) : shows program version
+- -g (--debug) : run in debug mode
+- -D (--dry-run) : shows what will happens with given command
 
